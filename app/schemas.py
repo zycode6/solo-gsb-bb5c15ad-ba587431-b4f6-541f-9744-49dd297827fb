@@ -190,3 +190,65 @@ class DesignPanelResponse(BaseModel):
     lanes: list[SampleLaneBands]
     pairs: list[PairDistinction]
     undistinguishable_pairs: list[SamplePair]
+
+
+MAX_RELEASE_ENZYMES = 12
+
+
+class ReleaseFragmentRequest(BaseModel):
+    """/release-fragment input: sequence, topology, the target interval
+    [start, end) defined forward along the original sequence, and up to
+    12 candidate enzymes (same rules as /digest)."""
+
+    sequence: str = Field(min_length=1, examples=["AAGAATTCTTGGATCCAA"])
+    topology: Literal["linear", "circular"] = "linear"
+    start: int = Field(ge=0, examples=[3])
+    end: int = Field(ge=0, examples=[7])
+    enzymes: list[EnzymeRule] = Field(
+        default_factory=list, max_length=MAX_RELEASE_ENZYMES
+    )
+
+    @field_validator("sequence")
+    @classmethod
+    def sequence_must_be_acgt(cls, value: str) -> str:
+        value = value.upper()
+        if not _SEQUENCE_RE.fullmatch(value):
+            raise ValueError("sequence must contain only A, C, G, T")
+        return value
+
+    @model_validator(mode="after")
+    def check_release(self) -> "ReleaseFragmentRequest":
+        n = len(self.sequence)
+        if self.topology == "linear":
+            if not self.start < self.end <= n:
+                raise ValueError(
+                    f"linear target requires 0 <= start < end <= {n} "
+                    f"(got start={self.start}, end={self.end})"
+                )
+        else:
+            if self.start >= n or self.end >= n:
+                raise ValueError(
+                    f"circular target coordinates must be < {n} "
+                    f"(got start={self.start}, end={self.end})"
+                )
+            if self.start == self.end:
+                raise ValueError("circular target requires start != end")
+        names = [e.name for e in self.enzymes]
+        if len(names) != len(set(names)):
+            raise ValueError("enzyme names must be unique")
+        for e in self.enzymes:
+            if len(e.site) > n:
+                raise ValueError(
+                    f"recognition site of enzyme {e.name!r} "
+                    f"({len(e.site)} bp) is longer than the sequence ({n} bp)"
+                )
+        return self
+
+
+class ReleaseFragmentResponse(BaseModel):
+    # solved=False (empty enzymes/cuts, null fragment) is the explicit
+    # no-solution result: no candidate subset releases exactly the target.
+    solved: bool
+    enzymes: list[str]
+    fragment: FragmentOut | None
+    cuts: list[int]

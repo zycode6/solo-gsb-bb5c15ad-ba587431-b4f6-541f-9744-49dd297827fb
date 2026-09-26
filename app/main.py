@@ -15,6 +15,7 @@ from .digest import (
     partial_digest_distribution,
 )
 from .panel import PanelEnzyme, PanelSample, design_panel
+from .release import ReleaseEnzyme, design_release, target_fragment
 from .schemas import (
     DesignPanelRequest,
     DesignPanelResponse,
@@ -26,18 +27,21 @@ from .schemas import (
     PairDistinction,
     PartialDigestRequest,
     PartialDigestResponse,
+    ReleaseFragmentRequest,
+    ReleaseFragmentResponse,
     SampleLaneBands,
     SamplePair,
 )
 
 app = FastAPI(
     title="DNA Restriction Digest Simulator",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Simulates restriction-enzyme digestion of linear or circular DNA. "
         "Recognition sites (IUPAC) and their reverse complements are searched "
         "with overlaps kept; all enzymes cut simultaneously. "
-        "Also designs minimal enzyme panels that distinguish DNA samples."
+        "Also designs minimal enzyme panels that distinguish DNA samples and "
+        "minimal enzyme sets that release a target fragment."
     ),
 )
 
@@ -157,4 +161,38 @@ def run_design_panel(request: DesignPanelRequest) -> DesignPanelResponse:
         undistinguishable_pairs=[
             SamplePair(samples=list(pair)) for pair in result.undistinguishable_pairs
         ],
+    )
+
+
+@app.post(
+    "/release-fragment",
+    response_model=ReleaseFragmentResponse,
+    tags=["release-fragment"],
+)
+def run_release_fragment(request: ReleaseFragmentRequest) -> ReleaseFragmentResponse:
+    circular = request.topology == "circular"
+
+    result = design_release(
+        request.sequence,
+        circular,
+        request.start,
+        request.end,
+        enzymes=[
+            ReleaseEnzyme(name=e.name, site=e.site, cut_offset=e.cut_offset)
+            for e in request.enzymes
+        ],
+    )
+    if result is None:
+        return ReleaseFragmentResponse(
+            solved=False, enzymes=[], fragment=None, cuts=[]
+        )
+
+    fragment = target_fragment(request.sequence, circular, request.start, request.end)
+    return ReleaseFragmentResponse(
+        solved=True,
+        enzymes=result.enzymes,
+        fragment=FragmentOut(
+            start=fragment.start, length=fragment.length, sequence=fragment.sequence
+        ),
+        cuts=result.cuts,
     )
