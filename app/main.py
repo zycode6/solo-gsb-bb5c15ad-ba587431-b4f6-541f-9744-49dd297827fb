@@ -15,6 +15,7 @@ from .digest import (
     partial_digest_distribution,
 )
 from .panel import PanelEnzyme, PanelSample, design_panel
+from .release import ReleaseEnzyme, plan_release
 from .schemas import (
     DesignPanelRequest,
     DesignPanelResponse,
@@ -26,6 +27,8 @@ from .schemas import (
     PairDistinction,
     PartialDigestRequest,
     PartialDigestResponse,
+    ReleaseFragmentRequest,
+    ReleaseFragmentResponse,
     SampleLaneBands,
     SamplePair,
 )
@@ -37,7 +40,8 @@ app = FastAPI(
         "Simulates restriction-enzyme digestion of linear or circular DNA. "
         "Recognition sites (IUPAC) and their reverse complements are searched "
         "with overlaps kept; all enzymes cut simultaneously. "
-        "Also designs minimal enzyme panels that distinguish DNA samples."
+        "Also designs minimal enzyme panels that distinguish DNA samples "
+        "and minimal enzyme combinations that release a target fragment."
     ),
 )
 
@@ -157,4 +161,37 @@ def run_design_panel(request: DesignPanelRequest) -> DesignPanelResponse:
         undistinguishable_pairs=[
             SamplePair(samples=list(pair)) for pair in result.undistinguishable_pairs
         ],
+    )
+
+
+@app.post(
+    "/release-fragment",
+    response_model=ReleaseFragmentResponse,
+    tags=["release-fragment"],
+)
+def run_release_fragment(request: ReleaseFragmentRequest) -> ReleaseFragmentResponse:
+    result = plan_release(
+        sequence=request.sequence,
+        circular=request.topology == "circular",
+        start=request.start,
+        end=request.end,
+        enzymes=[
+            ReleaseEnzyme(name=e.name, site=e.site, cut_offset=e.cut_offset)
+            for e in request.enzymes
+        ],
+    )
+
+    return ReleaseFragmentResponse(
+        feasible=result.feasible,
+        enzymes=result.enzymes,
+        fragment=(
+            FragmentOut(
+                start=result.fragment.start,
+                length=result.fragment.length,
+                sequence=result.fragment.sequence,
+            )
+            if result.fragment is not None
+            else None
+        ),
+        cuts=result.cuts,
     )

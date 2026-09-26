@@ -1,6 +1,6 @@
 # DNA Restriction Digest Simulator
 
-基于 Python + FastAPI 的 DNA 限制性内切酶平切模拟服务。接收 ACGT 序列、线性/环状标记和酶规则，搜索识别串及其反向互补串（保留重叠匹配），合并所有切点同时切割，返回各酶切点与酶切片段。亦可为多个 DNA 样本设计最小酶组合（电泳面板），使任意两个样本的条带图谱都可区分。`/partial-digest` 在上述匹配/去重规则之上，为每种酶增加独立切开概率 p，精确计算片段长度的期望数量分布与整条分子无切口概率。
+基于 Python + FastAPI 的 DNA 限制性内切酶平切模拟服务。接收 ACGT 序列、线性/环状标记和酶规则，搜索识别串及其反向互补串（保留重叠匹配），合并所有切点同时切割，返回各酶切点与酶切片段。亦可为多个 DNA 样本设计最小酶组合（电泳面板），使任意两个样本的条带图谱都可区分。`/partial-digest` 在上述匹配/去重规则之上，为每种酶增加独立切开概率 p，精确计算片段长度的期望数量分布与整条分子无切口概率。`/release-fragment` 则反向求解：给定目标区间，从候选酶中挑选能恰好切出该目标片段的最少酶组合。
 
 ## 启动
 
@@ -26,6 +26,7 @@ docker compose up --build
 - 酶切模拟： `POST http://localhost:8000/digest`
 - 概率酶切模拟： `POST http://localhost:8000/partial-digest`
 - 酶面板设计： `POST http://localhost:8000/design-panel`
+- 目标片段释放设计： `POST http://localhost:8000/release-fragment`
 
 ## 接口说明
 
@@ -218,6 +219,120 @@ curl -s -X POST http://localhost:8000/design-panel \
 }
 ```
 
+### `POST /release-fragment`
+
+反向设计：给定目标区间，从 1～12 种候选酶中挑选能**恰好切出该目标片段**的最少酶组合。接口地址 `http://localhost:8000/release-fragment`（端口同其他接口，默认 8000，可用 `PORT` 环境变量修改）。
+
+请求体：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `sequence` | string | DNA 序列，仅含 A/C/G/T（大小写均可，内部统一大写） |
+| `topology` | string | `"linear"`（默认）或 `"circular"` |
+| `start` | int | 目标片段起点（零基，≥ 0），沿原序列正向 |
+| `end` | int | 目标片段终点（零基，不含），沿原序列正向 |
+| `enzymes` | array | 1～12 种候选酶，格式与 `/digest` 相同：`name`（唯一）、`site`（IUPAC）、`cut_offset`（0 ≤ k ≤ 串长，且识别串不得长于序列） |
+
+区间合法性（不满足返回 422）：
+
+- 线性：`0 ≤ start < end ≤ 序列长度`。
+- 环状：`start`、`end` 均为 `< 序列长度` 的合法坐标且**不相等**；`end < start` 时目标片段跨首尾（正向绕回原点）。
+
+规则要点：
+
+- 复用 `/digest` 的识别串/反向互补匹配、重叠保留、同酶同点去重与环状切点取模规则。
+- 目标两端必须各为**所选酶的切点**或**线性天然末端**（线性 `start = 0` 或 `end = n` 时该端无需切点；环状无天然末端，两端都必须是切点）。
+- 所选酶在目标**内部**（两端之间的弧上，不含端点）不得产生任何切点；在目标之外切割不受限制。
+- 同一位置被多种酶命中只算**一个**切点（响应中的 `cuts` 为所选酶全部切点去重排序后的列表）。
+- 选择满足条件的最少酶组合；酶数相同的方案按**排序后酶名列表的字典序**取首个。
+- 线性全长目标（`start = 0` 且 `end = n`）两端均为天然末端，不需要任何酶：返回空酶列表。
+- 无解时返回明确的无解结果：`feasible = false`，`enzymes`/`cuts` 为空，`fragment` 为 `null`（HTTP 状态仍为 200）。
+
+响应字段：
+
+| 字段 | 说明 |
+|---|---|
+| `feasible` | 是否存在满足条件的酶组合 |
+| `enzymes` | 所选酶名（排序后）；无解时为空 |
+| `fragment` | 释放出的目标片段（`start`、`length`、原序列方向的 `sequence`）；无解时为 `null` |
+| `cuts` | 所选酶在分子上的实际切点（去重、升序，含目标之外的切点）；无解时为空 |
+
+示例（线性，单酶即可切出目标片段）：
+
+```bash
+curl -s -X POST http://localhost:8000/release-fragment \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "sequence": "ACGTGAATTCGGGAATTCAA",
+        "topology": "linear",
+        "start": 5,
+        "end": 9,
+        "enzymes": [
+          {"name": "EcoRI", "site": "GAATTC", "cut_offset": 1}
+        ]
+      }'
+```
+
+响应（EcoRI 在 5 和 9 的切点正好为目标两端，13、17 为目标之外的实际切点）：
+
+```json
+{
+  "feasible": true,
+  "enzymes": ["EcoRI"],
+  "fragment": {"start": 5, "length": 4, "sequence": "AATT"},
+  "cuts": [5, 9, 13, 17]
+}
+```
+
+环状跨首尾示例（目标从 5 正向绕回 1）：
+
+```bash
+curl -s -X POST http://localhost:8000/release-fragment \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "sequence": "GAATTC",
+        "topology": "circular",
+        "start": 5,
+        "end": 1,
+        "enzymes": [
+          {"name": "EcoRI", "site": "GAATTC", "cut_offset": 1}
+        ]
+      }'
+```
+
+```json
+{
+  "feasible": true,
+  "enzymes": ["EcoRI"],
+  "fragment": {"start": 5, "length": 2, "sequence": "CG"},
+  "cuts": [1, 5]
+}
+```
+
+无解示例（目标两端都不是切点）：
+
+```bash
+curl -s -X POST http://localhost:8000/release-fragment \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "sequence": "ACGTGAATTCGGGAATTCAA",
+        "start": 6,
+        "end": 8,
+        "enzymes": [
+          {"name": "EcoRI", "site": "GAATTC", "cut_offset": 1}
+        ]
+      }'
+```
+
+```json
+{
+  "feasible": false,
+  "enzymes": [],
+  "fragment": null,
+  "cuts": []
+}
+```
+
 ## 本地开发（不用 Docker）
 
 ```bash
@@ -235,14 +350,16 @@ python3 -m pytest tests/ -q
 
 ```
 app/
-  main.py      # FastAPI 应用与路由（/health、/digest、/partial-digest、/design-panel）
+  main.py      # FastAPI 应用与路由（/health、/digest、/partial-digest、/design-panel、/release-fragment）
   digest.py    # 核心酶切逻辑：IUPAC 匹配、切点计算、片段生成、概率酶切期望分布（O(K²)）
   panel.py     # 面板设计：单酶切条带、可区分性判定、最小酶组选择
-  schemas.py   # 请求/响应模型与校验（含 /partial-digest 的 p 与 2000 bp 限制）
+  release.py   # 片段释放设计：目标区间内部切点过滤、必需端点覆盖、最少酶组合枚举
+  schemas.py   # 请求/响应模型与校验（含 /partial-digest 的 p 与 2000 bp 限制、/release-fragment 的区间校验）
 tests/
   test_digest.py
   test_partial_digest.py
   test_panel.py
+  test_release.py
 Dockerfile
 docker-compose.yml
 requirements.txt
